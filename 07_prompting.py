@@ -244,6 +244,7 @@ def _summarize_comment_evidence(
             f"- `{comment_id}` is sentiment `{sentiment}`, with intent `{intent}`, objection `{objection}`, "
             f"buyer stage `{stage}`, and trust status `{trust}` [{item['citation']}]."
         )
+    lines.append("")
     lines.append(
         "These are traceable classified-comment signals, but they are not a representative "
         "market survey and should not be treated as final truth while marked `review_required`."

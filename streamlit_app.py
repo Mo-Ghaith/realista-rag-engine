@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import html
 import importlib
 from pathlib import Path
 import sys
@@ -262,7 +261,7 @@ def inject_styles(hero_uri: str) -> None:
         color: var(--teal-dark);
     }}
 
-    .answer-shell {{
+    .st-key-answer_shell {{
         background: #0f211f;
         border: 1px solid rgba(255, 255, 255, 0.12);
         border-radius: 8px;
@@ -271,10 +270,27 @@ def inject_styles(hero_uri: str) -> None:
         box-shadow: 0 18px 42px rgba(15, 33, 31, 0.18);
     }}
 
-    .answer-shell p {{
+    .st-key-answer_shell p,
+    .st-key-answer_shell li {{
         color: #ecfffb;
         font-size: 16px;
         line-height: 1.65;
+        overflow-wrap: anywhere;
+    }}
+
+    .st-key-answer_shell p:first-child {{
+        margin-top: 0;
+    }}
+
+    .st-key-answer_shell p:last-child {{
+        margin-bottom: 0;
+    }}
+
+    .st-key-answer_shell code {{
+        background: rgba(255, 255, 255, 0.11);
+        color: #baf8ed;
+        white-space: normal;
+        overflow-wrap: anywhere;
     }}
 
     @media (max-width: 760px) {{
@@ -394,11 +410,8 @@ if run_query:
             st.error(str(exc))
         else:
             st.markdown('<div class="section-title">Answer</div>', unsafe_allow_html=True)
-            rendered_answer = html.escape(str(result["answer"])).replace("\n", "<br>")
-            st.markdown(
-                f'<div class="answer-shell"><p>{rendered_answer}</p></div>',
-                unsafe_allow_html=True,
-            )
+            with st.container(key="answer_shell"):
+                st.markdown(str(result["answer"]))
             st.caption(
                 f"Mode: {result['mode']} | "
                 f"Retrieved context used: {result['used_retrieved_context']}"
