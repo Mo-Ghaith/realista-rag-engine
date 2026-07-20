@@ -1,6 +1,6 @@
 # Realista RAG Engine
 
-An evidence-bounded retrieval-augmented generation system for traceable question answering. The project turns source-labelled documents into cleaned text, overlapping chunks, deterministic vector representations, a Chroma vector index, retrieved context, and cited answers through a Streamlit interface.
+An evidence-bounded retrieval-augmented generation system for traceable question answering. The project turns Realista source documents, evidence capsules, fact packs, and optional uploads into cleaned text, overlapping chunks, deterministic vector representations, a Chroma vector index, retrieved context, and cited answers through a Streamlit interface.
 
 ## Pipeline
 
@@ -34,6 +34,8 @@ Each stage is intentionally separated into an executable Python module:
 - Arabic UTF-8 text and source metadata remain intact across the pipeline.
 - OpenRouter is optional; the system has a cited local extractive fallback.
 - No API key is stored in source code.
+- Deployed builds include compact Realista evidence exports under `data/processed/`.
+- Review-required comment labels are cited as model/committee evidence awaiting human validation, not as final market truth.
 
 ## Run locally
 
@@ -45,6 +47,17 @@ streamlit run streamlit_app.py
 ```
 
 The built-in documents make the application runnable immediately. UTF-8 `.txt` and `.md` documents can also be uploaded through the UI.
+
+To refresh the deployment evidence files from the full Realista workspace, run:
+
+```powershell
+python build_realista_rag_exports.py
+```
+
+This writes:
+
+- `data/processed/evidence_capsules.jsonl`
+- `data/processed/fact_packs.jsonl`
 
 ## Optional OpenRouter configuration
 

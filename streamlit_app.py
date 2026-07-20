@@ -1,4 +1,4 @@
-"""Streamlit interface for the complete course RAG pipeline."""
+"""Streamlit interface for the complete Realista RAG pipeline."""
 
 from __future__ import annotations
 
@@ -27,9 +27,9 @@ except Exception:
     pass
 
 
-st.set_page_config(page_title="Realista RAG Engine", page_icon="🔎")
+st.set_page_config(page_title="Realista RAG Engine", page_icon="Search")
 st.title("Realista RAG Engine")
-st.caption("Documents → preprocessing → chunks → vectors → Chroma → retrieval → answer")
+st.caption("Documents -> preprocessing -> chunks -> vectors -> Chroma -> retrieval -> answer")
 
 uploaded_files = st.file_uploader(
     "Optional: add UTF-8 text documents",
@@ -46,9 +46,10 @@ for uploaded in uploaded_files:
 documents = documents_stage.load_documents()
 documents.extend(documents_stage.documents_from_uploads(uploads))
 _, collection = store_stage.build_store_from_documents(documents)
+st.caption(f"Indexed {len(documents)} source documents and {collection.count()} chunks.")
 
-question = st.text_input("Ask a question about the indexed documents")
-top_k = st.slider("Retrieved chunks", min_value=1, max_value=6, value=3)
+question = st.text_input("Ask a question about the indexed Realista evidence")
+top_k = st.slider("Retrieved chunks", min_value=1, max_value=6, value=4)
 
 if st.button("Retrieve and answer", type="primary"):
     if not question.strip():
@@ -62,12 +63,15 @@ if st.button("Retrieve and answer", type="primary"):
         else:
             st.subheader("Answer")
             st.write(result["answer"])
-            st.caption(f"Mode: {result['mode']} | Retrieved context used: {result['used_retrieved_context']}")
+            st.caption(
+                f"Mode: {result['mode']} | "
+                f"Retrieved context used: {result['used_retrieved_context']}"
+            )
             st.subheader("Sources")
             for source in result["sources"]:
                 st.markdown(
                     f"- **[{source['citation']}] {source['source_name']}** "
-                    f"— chunk `{source['chunk_id']}`"
+                    f"- chunk `{source['chunk_id']}`"
                 )
             with st.expander("Retrieved chunks"):
                 for item in retrieved:
