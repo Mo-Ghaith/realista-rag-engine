@@ -16,10 +16,23 @@ if str(APP_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(APP_DIRECTORY))
 
 
-documents_stage = importlib.import_module("01_documents")
-store_stage = importlib.import_module("05_create_chroma_store")
-retrieval_stage = importlib.import_module("06_retrieve_context")
-rag = importlib.import_module("07_prompting")
+importlib.invalidate_caches()
+stage_modules = {
+    name: importlib.reload(importlib.import_module(name))
+    for name in (
+        "01_documents",
+        "02_preprocessing",
+        "03_chunking",
+        "04_vector_representation",
+        "05_create_chroma_store",
+        "06_retrieve_context",
+        "07_prompting",
+    )
+}
+documents_stage = stage_modules["01_documents"]
+store_stage = stage_modules["05_create_chroma_store"]
+retrieval_stage = stage_modules["06_retrieve_context"]
+rag = stage_modules["07_prompting"]
 
 try:
     if not rag.OPENROUTER_API_KEY:
