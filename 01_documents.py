@@ -175,11 +175,23 @@ def load_realista_market_documents() -> list[dict[str, str]]:
                     continue
                 row = json.loads(line)
                 pack_id = str(row.get("fact_pack_id") or f"market_pack_{line_number}")
+                entity_type = str(row.get("entity_type") or "market")
+                entity_name = str(
+                    row.get("name")
+                    or row.get("location")
+                    or row.get("developer")
+                    or row.get("project")
+                    or pack_id
+                )
                 documents.append(
                     {
                         "document_id": f"market_fact_{pack_id}",
-                        "source_name": f"Market fact pack {pack_id}",
+                        "source_name": f"Market fact pack {pack_id} - {entity_name}",
                         "source_url": f"realista://market_facts/{pack_id}",
+                        "document_type": "market_fact",
+                        "entity_type": entity_type,
+                        "entity_name": entity_name,
+                        "atomic_document": True,
                         "text": _market_fact_text(row),
                     }
                 )
@@ -344,29 +356,49 @@ def _fact_pack_text(row: dict) -> str:
 def _market_fact_text(row: dict) -> str:
     lines = [
         f"Market Fact Pack ID: {row.get('fact_pack_id')}",
+        f"Analysis Version: {row.get('analysis_version') or 'legacy_market_export'}",
         f"Evidence type: {row.get('evidence_type')}",
-        f"Scope: {row.get('scope') or ''}",
+        f"Entity Type: {row.get('entity_type') or ''}",
+        f"Entity ID: {row.get('entity_id') or ''}",
+        f"Name: {row.get('name') or ''}",
+        f"Scope: {row.get('scope') or row.get('name') or ''}",
     ]
     for key in [
         "location",
         "developer",
+        "project",
         "unit_type",
         "record_count",
+        "unit_count",
         "location_count",
         "developer_count",
         "project_count",
         "developers",
+        "developer_ids",
         "projects",
+        "project_ids",
         "locations",
+        "location_ids",
+        "name_en",
+        "name_ar",
+        "name_aliases_en",
+        "name_aliases_ar",
         "unit_type_counts",
+        "unit_types",
         "price_egp",
+        "area_sqm",
+        "price_per_sqm_egp",
         "top_locations_by_observations",
         "top_developers_by_observations",
+        "capture_window",
+        "source_coverage",
+        "market_trust_status",
+        "source_urls",
     ]:
         if key in row:
             lines.append(f"{key.replace('_', ' ').title()}: {row[key]}")
     if "limitations" in row:
-        lines.append(f"Limitations: {str(row['limitations'][0]) if row['limitations'] else ''}")
+        lines.append(f"Limitations: {row['limitations']}")
     return "\n".join(lines)
 
 

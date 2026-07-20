@@ -21,8 +21,9 @@ def chunk_documents(
     step = chunk_size - overlap
     for document in documents:
         words = str(document.get("text", "")).split()
-        for start in range(0, len(words), step):
-            chunk_words = words[start : start + chunk_size]
+        starts = [0] if document.get("atomic_document") else range(0, len(words), step)
+        for start in starts:
+            chunk_words = words if document.get("atomic_document") else words[start : start + chunk_size]
             if not chunk_words:
                 continue
             text = " ".join(chunk_words)
@@ -33,11 +34,14 @@ def chunk_documents(
                     "document_id": document["document_id"],
                     "source_name": document["source_name"],
                     "source_url": document.get("source_url", ""),
+                    "document_type": document.get("document_type", "text"),
+                    "entity_type": document.get("entity_type", ""),
+                    "entity_name": document.get("entity_name", ""),
                     "start_word": start,
                     "text": text,
                 }
             )
-            if start + chunk_size >= len(words):
+            if document.get("atomic_document") or start + chunk_size >= len(words):
                 break
     return chunks
 

@@ -38,6 +38,9 @@ def create_chroma_store(
                     "document_id": str(chunk["document_id"]),
                     "source_name": str(chunk["source_name"]),
                     "source_url": str(chunk.get("source_url", "")),
+                    "document_type": str(chunk.get("document_type", "text")),
+                    "entity_type": str(chunk.get("entity_type", "")),
+                    "entity_name": str(chunk.get("entity_name", "")),
                     "start_word": int(chunk["start_word"]),
                 }
                 for chunk in vectorized_chunks

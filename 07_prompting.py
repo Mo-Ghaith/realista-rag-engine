@@ -25,6 +25,9 @@ Answer the user's question using only the retrieved context below.
 Write a concise, useful answer for a real-estate analyst.
 Do not dump raw JSON, Python dictionaries, or source fields unless the user asks for raw records.
 If the evidence is aggregate, summarize the main pattern, then mention limitations.
+When the user asks which developers or projects are in a location, list every name
+present in the retrieved location aggregate and report its coverage count. Do not
+shorten a complete aggregate list to examples.
 If the evidence is comment-level, mention the relevant comment IDs and labels.
 Every factual claim must cite one or more labels such as [S1].
 If the context is insufficient, say so plainly.
@@ -140,23 +143,36 @@ def _summarize_market_evidence(
     developer = _field(text, "Developer")
     unit_type = _field(text, "Unit Type")
     record_count = _field(text, "Record Count")
+    developer_count = _field(text, "Developer Count")
     price_stats = _parse_literal(_field(text, "Price Egp"))
     developers = _as_list(_field(text, "Developers"))
     projects = _as_list(_field(text, "Projects"))
     locations = _as_list(_field(text, "Locations"))
+    source_coverage = _parse_literal(_field(text, "Source Coverage"))
+    capture_window = _parse_literal(_field(text, "Capture Window"))
     limitations = _as_list(_field(text, "Limitations"))
 
     subject = _market_subject(location, developer, unit_type, pack_id)
     lines: list[str] = []
 
     if wants_developers and developers:
-        shown = ", ".join(developers[:10])
+        covered_snapshots = record_count
+        if isinstance(source_coverage, dict):
+            covered_snapshots = str(source_coverage.get("listing_snapshot_count") or record_count)
         lines.append(
-            f"For {location or subject}, Realista's Nawy market evidence shows "
-            f"{len(developers)} developer(s), including {shown} [{citation}]."
+            f"For {location or subject}, the validated Realista Nawy rollup contains "
+            f"{developer_count or len(developers)} developer entities backed by "
+            f"{_count_text(covered_snapshots)} latest listing snapshots [{citation}]."
         )
+        lines.extend(["", "Developers:"])
+        for start in range(0, len(developers), 4):
+            lines.append(f"- {', '.join(developers[start:start + 4])} [{citation}]")
         if projects:
-            lines.append(f"Example projects include {', '.join(projects[:8])} [{citation}].")
+            lines.append("")
+            lines.append(
+                f"The same rollup covers {len(projects)} projects; ask for the project list "
+                f"if you want those names as well [{citation}]."
+            )
     elif wants_price and isinstance(price_stats, dict):
         lines.append(
             f"For {subject}, the available Nawy listed-price evidence contains "
@@ -191,8 +207,19 @@ def _summarize_market_evidence(
         if locations:
             lines.append(f"Locations: {', '.join(locations[:10])} [{citation}].")
 
+    if isinstance(capture_window, dict) and capture_window.get("latest_observed_at"):
+        lines.append("")
+        lines.append(
+            f"Latest observation in this rollup: "
+            f"{_timestamp_text(capture_window['latest_observed_at'])} "
+            f"[{citation}]."
+        )
     if limitations:
+        lines.append("")
         lines.append(f"Important limitation: {limitations[0]} [{citation}].")
+        if wants_developers and len(limitations) > 1:
+            lines.append("")
+            lines.append(f"Coverage limitation: {limitations[1]} [{citation}].")
     return "\n".join(lines)
 
 
@@ -354,7 +381,13 @@ def _best_market_pack(items: list[dict[str, object]], question: str) -> dict[str
         text_terms = set(TOKEN_PATTERN.findall(text.casefold()))
         pack_id = _field(text, "Market Fact Pack ID").casefold()
         unit_type = _field(text, "Unit Type")
+        entity_type = str(item.get("entity_type", "")).casefold()
+        entity_name = str(item.get("entity_name", "")).casefold()
         specificity = 0
+        if wants_developers and not requested_units and entity_type == "location":
+            specificity += 12
+        if entity_name and entity_name in question.casefold():
+            specificity += 10
         if "market_location_" in pack_id and not unit_type:
             specificity += 6 if wants_developers and not requested_units else 2
         if "market_location_" in pack_id and unit_type:
@@ -386,6 +419,17 @@ def _money(value) -> str:
         return f"{float(value):,.0f} EGP"
     except (TypeError, ValueError):
         return "unavailable"
+
+
+def _count_text(value) -> str:
+    try:
+        return f"{int(float(value)):,}"
+    except (TypeError, ValueError):
+        return "the available"
+
+
+def _timestamp_text(value) -> str:
+    return str(value or "unavailable").replace("T", " ").split(".", 1)[0]
 
 
 def _wanted_comment_labels(question: str) -> set[str]:
@@ -427,15 +471,21 @@ def _field(text: str, label: str) -> str:
     labels = [
         "Comment ID",
         "Post ID",
+        "Analysis Version",
         "Evidence type",
         "Fact pack ID",
         "Market Fact Pack ID",
+        "Entity Type",
+        "Entity ID",
+        "Name",
         "Scope",
         "Location",
         "Developer",
+        "Project",
         "Unit Type",
         "Row Count",
         "Record Count",
+        "Unit Count",
         "Location Count",
         "Developer Count",
         "Project Count",
@@ -443,16 +493,30 @@ def _field(text: str, label: str) -> str:
         "Review Required Count",
         "Duplicate Count",
         "Developers",
+        "Developer Ids",
         "Projects",
+        "Project Ids",
         "Locations",
+        "Location Ids",
+        "Name En",
+        "Name Ar",
+        "Name Aliases En",
+        "Name Aliases Ar",
         "Sentiment Counts",
         "Intent Counts",
         "Objection Counts",
         "Buyer Stage Counts",
         "Unit Type Counts",
+        "Unit Types",
         "Price Egp",
+        "Area Sqm",
+        "Price Per Sqm Egp",
         "Top Locations By Observations",
         "Top Developers By Observations",
+        "Capture Window",
+        "Source Coverage",
+        "Market Trust Status",
+        "Source Urls",
         "Example Urls",
         "Evidence Comment Ids",
         "Examples By Label",

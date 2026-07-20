@@ -162,6 +162,7 @@ def _rerank_for_realista(
         and not (query_terms & {"developer", "developers", "mean", "average", "median"})
     )
     wants_market_evidence = bool(query_terms & MARKET_TERMS) and not wants_comment_evidence
+    wants_developer_list = bool(query_terms & {"developer", "developers", "who"}) and not requested_units
 
     def score(item: dict[str, object]) -> tuple[float, float]:
         text = f"{item.get('source_name', '')} {item.get('text', '')}".casefold()
@@ -171,8 +172,16 @@ def _rerank_for_realista(
         evidence_boost = 0.0
         if wants_market_evidence and "market fact pack" in source_name:
             evidence_boost += 12.0
-            if query_terms & {"developer", "developers", "who"} and not requested_units:
+            entity_type = str(item.get("entity_type", "")).casefold()
+            entity_name = str(item.get("entity_name", "")).casefold()
+            if wants_developer_list:
                 evidence_boost += 5.0 if "unit type:" not in text else -4.0
+                if entity_type == "location":
+                    evidence_boost += 24.0
+                elif entity_type in {"developer", "project"}:
+                    evidence_boost -= 4.0
+            if entity_name and entity_name in question.casefold():
+                evidence_boost += 18.0
             for unit in requested_units:
                 singular = unit[:-1] if unit.endswith("s") else unit
                 if f"unit type: {singular}" in text:

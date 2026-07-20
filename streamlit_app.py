@@ -181,6 +181,16 @@ def inject_styles(hero_uri: str) -> None:
         font-weight: 600;
     }}
 
+    .coverage-strip {{
+        color: var(--muted);
+        font-size: 14px;
+        margin: -6px 0 26px;
+    }}
+
+    .coverage-strip strong {{
+        color: var(--teal-dark);
+    }}
+
     .section-title {{
         font-size: 22px;
         font-weight: 800;
@@ -312,13 +322,13 @@ def inject_styles(hero_uri: str) -> None:
     )
 
 
-def metric_row(document_count: int, chunk_count: int, mode: str) -> None:
+def metric_row(document_count: int, chunk_count: int, market_count: int, mode: str) -> None:
     st.markdown(
         f"""
 <div class="metric-row">
     <div class="metric"><div class="metric-value">{document_count}</div><div class="metric-label">Evidence sources</div></div>
     <div class="metric"><div class="metric-value">{chunk_count}</div><div class="metric-label">Searchable chunks</div></div>
-    <div class="metric"><div class="metric-value">43</div><div class="metric-label">Comment capsules</div></div>
+    <div class="metric"><div class="metric-value">{market_count}</div><div class="metric-label">Market rollups</div></div>
     <div class="metric"><div class="metric-value">{mode}</div><div class="metric-label">Answer mode</div></div>
 </div>
         """,
@@ -367,10 +377,29 @@ for uploaded in uploaded_files:
 documents = documents_stage.load_documents()
 documents.extend(documents_stage.documents_from_uploads(uploads))
 _, collection = store_stage.build_store_from_documents(documents)
+market_counts = {
+    entity_type: sum(
+        document.get("document_type") == "market_fact"
+        and document.get("entity_type") == entity_type
+        for document in documents
+    )
+    for entity_type in ("location", "developer", "project")
+}
 metric_row(
     document_count=len(documents),
     chunk_count=collection.count(),
+    market_count=sum(market_counts.values()),
     mode="OpenRouter" if rag.OPENROUTER_API_KEY else "Local",
+)
+st.markdown(
+    f"""
+<div class="coverage-strip">
+    Validated Nawy coverage: <strong>{market_counts['location']} locations</strong> &middot;
+    <strong>{market_counts['developer']} developers</strong> &middot;
+    <strong>{market_counts['project']} projects</strong>
+</div>
+    """,
+    unsafe_allow_html=True,
 )
 
 left, right = st.columns([1.12, 0.88], gap="large")

@@ -5,6 +5,7 @@ This script copies the evidence that the RAG app needs into local JSONL files:
 
 - `data/processed/evidence_capsules.jsonl`
 - `data/processed/fact_packs.jsonl`
+- `data/processed/market_facts.jsonl`
 
 The exports deliberately preserve trust and review fields. Review-required
 comments can be cited as evidence of model output, but not as final market truth.
@@ -13,9 +14,11 @@ comments can be cited as evidence of model output, but not as final market truth
 from __future__ import annotations
 
 import ast
+import argparse
 from collections import Counter
 import csv
 import json
+import os
 from pathlib import Path
 import re
 from statistics import mean, median
@@ -27,12 +30,29 @@ PARENT_PROCESSED = REALISTA_ROOT / "data" / "processed"
 LOCAL_PROCESSED = APP_DIRECTORY / "data" / "processed"
 
 
+MARKET_ANALYSIS_VERSION = "nawy_market_rollup_rag_v1"
+MARKET_ROLLUP_COLLECTIONS = (
+    ("locations", "location", "location_id"),
+    ("developers", "developer", "developer_id"),
+    ("projects", "project", "project_id"),
+)
+
+
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--market-source",
+        choices=("auto", "mongo", "controlled"),
+        default="auto",
+        help="Use validated Mongo rollups when available, or the older controlled export.",
+    )
+    args = parser.parse_args()
+
     LOCAL_PROCESSED.mkdir(parents=True, exist_ok=True)
     rows = _load_classified_comments()
     capsules = [_row_to_capsule(row) for row in rows]
     fact_packs = _build_fact_packs(rows)
-    market_facts = _build_market_facts()
+    market_facts, market_source = _build_market_facts(args.market_source)
 
     _write_jsonl(LOCAL_PROCESSED / "evidence_capsules.jsonl", capsules)
     _write_jsonl(LOCAL_PROCESSED / "fact_packs.jsonl", fact_packs)
@@ -41,7 +61,7 @@ def main() -> None:
         "Wrote "
         f"{len(capsules)} evidence capsules, {len(fact_packs)} fact packs, "
         f"and {len(market_facts)} market fact packs "
-        f"to {LOCAL_PROCESSED}"
+        f"from {market_source} to {LOCAL_PROCESSED}"
     )
 
 
@@ -162,7 +182,147 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def _build_market_facts() -> list[dict]:
+def _build_market_facts(source: str = "auto") -> tuple[list[dict], str]:
+    if source in {"auto", "mongo"}:
+        try:
+            rollups = _load_market_rollups_from_mongo()
+        except (ImportError, RuntimeError) as exc:
+            if source == "mongo":
+                raise
+            rollups = []
+            print(f"Validated Mongo rollups unavailable; using controlled export: {exc}")
+        if rollups:
+            return [_market_rollup_pack(kind, row) for kind, row in rollups], "validated Mongo rollups"
+    return _build_controlled_market_facts(), "controlled property export"
+
+
+def _load_market_rollups_from_mongo() -> list[tuple[str, dict]]:
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        load_dotenv = None
+    if load_dotenv:
+        load_dotenv(REALISTA_ROOT / ".env")
+
+    mongo_uri = os.getenv("MONGO_URI", "").strip()
+    if not mongo_uri:
+        raise RuntimeError("MONGO_URI is not configured")
+    try:
+        from pymongo import MongoClient
+    except ImportError as exc:
+        raise ImportError("pymongo is required for --market-source mongo") from exc
+
+    client = MongoClient(mongo_uri, serverSelectionTimeoutMS=10000)
+    try:
+        database = client[os.getenv("MONGO_DB", "Realista")]
+        available = set(database.list_collection_names())
+        missing = [name for name, _, _ in MARKET_ROLLUP_COLLECTIONS if name not in available]
+        if missing:
+            raise RuntimeError(f"Missing validated rollup collections: {', '.join(missing)}")
+
+        rollups: list[tuple[str, dict]] = []
+        for collection_name, entity_type, id_field in MARKET_ROLLUP_COLLECTIONS:
+            cursor = database[collection_name].find({}, {"_id": 0}).sort(id_field, 1)
+            rollups.extend((entity_type, row) for row in cursor if row.get(id_field))
+        return rollups
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Could not read validated Mongo rollups: {exc}") from exc
+    finally:
+        client.close()
+
+
+def _market_rollup_pack(entity_type: str, row: dict) -> dict:
+    id_field = f"{entity_type}_id"
+    entity_id = str(row.get(id_field) or "unknown")
+    name = _clean_name(row.get("name") or row.get("name_en") or row.get("name_ar") or entity_id)
+    stats = row.get("stats") if isinstance(row.get("stats"), dict) else {}
+    lineage = row.get("lineage") if isinstance(row.get("lineage"), dict) else {}
+    source_urls = [str(url) for url in row.get("source_urls") or [] if str(url).strip()]
+    limitations = [
+        "Prices are asking/listed prices from validated Nawy observations, not verified transaction prices.",
+        "Coverage is limited to the authorized Realista crawl and does not prove that every market participant is present.",
+        "The deployment includes compact validated rollups; raw pages and quarantined observations are excluded.",
+    ]
+    pack = {
+        "fact_pack_id": f"market_{entity_type}_{_slug(name)}",
+        "analysis_version": MARKET_ANALYSIS_VERSION,
+        "evidence_type": f"market_{entity_type}_rollup",
+        "entity_type": entity_type,
+        "entity_id": entity_id,
+        id_field: entity_id,
+        "name": name,
+        "name_en": row.get("name_en"),
+        "name_ar": row.get("name_ar"),
+        "name_aliases_en": row.get("name_aliases_en") or [],
+        "name_aliases_ar": row.get("name_aliases_ar") or [],
+        "record_count": int(row.get("listing_snapshot_count") or stats.get("listing_snapshot_count") or 0),
+        "unit_count": int(row.get("unit_count") or stats.get("unit_count") or 0),
+        "price_egp": stats.get("price_egp") or {},
+        "area_sqm": stats.get("area_sqm") or {},
+        "price_per_sqm_egp": stats.get("price_per_sqm_egp") or {},
+        "unit_types": stats.get("unit_types") or row.get("unit_types") or [],
+        "capture_window": {
+            "earliest_observed_at": _json_value(row.get("earliest_observed_at")),
+            "latest_observed_at": _json_value(row.get("latest_observed_at")),
+        },
+        "source_coverage": {
+            "listing_snapshot_count": int(
+                row.get("listing_snapshot_count") or stats.get("listing_snapshot_count") or 0
+            ),
+            "unit_count": int(row.get("unit_count") or stats.get("unit_count") or 0),
+            "source_url_count": len(source_urls),
+            "latest_crawl_batch_ids": row.get("latest_crawl_batch_ids") or [],
+            "source_collections": lineage.get("source_collections") or {},
+        },
+        "source_urls": source_urls,
+        "market_trust_status": stats.get("market_trust_status") or "valid",
+        "limitations": limitations,
+    }
+
+    if entity_type == "location":
+        pack.update(
+            {
+                "location": name,
+                "developers": row.get("developers") or [],
+                "developer_ids": row.get("developer_ids") or [],
+                "developer_count": len(row.get("developer_ids") or row.get("developers") or []),
+                "projects": row.get("projects") or [],
+                "project_ids": row.get("project_ids") or [],
+                "project_count": len(row.get("project_ids") or row.get("projects") or []),
+            }
+        )
+    elif entity_type == "developer":
+        pack.update(
+            {
+                "developer": name,
+                "locations": row.get("locations") or [],
+                "location_ids": row.get("location_ids") or [],
+                "projects": row.get("known_projects") or [],
+                "project_ids": row.get("project_ids") or [],
+            }
+        )
+    else:
+        pack.update(
+            {
+                "project": name,
+                "developer": row.get("developer_name"),
+                "developer_id": row.get("developer_id"),
+                "locations": row.get("locations") or [],
+                "location_ids": row.get("location_ids") or [],
+            }
+        )
+    return pack
+
+
+def _json_value(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _build_controlled_market_facts() -> list[dict]:
     source_path = REALISTA_ROOT / "data" / "ingested" / "nawy_english_property500_controlled_20260718.json"
     if not source_path.exists():
         return []

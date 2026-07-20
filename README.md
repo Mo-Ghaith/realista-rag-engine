@@ -35,6 +35,7 @@ Each stage is intentionally separated into an executable Python module:
 - OpenRouter is optional; the system has a cited local extractive fallback.
 - No API key is stored in source code.
 - Deployed builds include compact Realista evidence exports under `data/processed/`.
+- The market export contains every validated compact Nawy location, developer, and project rollup available at generation time; raw pages and quarantined observations are excluded.
 - Review-required comment labels are cited as model/committee evidence awaiting human validation, not as final market truth.
 
 ## Run locally
@@ -48,16 +49,19 @@ streamlit run streamlit_app.py
 
 The built-in documents make the application runnable immediately. UTF-8 `.txt` and `.md` documents can also be uploaded through the UI.
 
-To refresh the deployment evidence files from the full Realista workspace, run:
+To refresh the deployment evidence files from the full Realista workspace and its validated Mongo rollups, run:
 
 ```powershell
-python build_realista_rag_exports.py
+python build_realista_rag_exports.py --market-source mongo
 ```
 
 This writes:
 
 - `data/processed/evidence_capsules.jsonl`
 - `data/processed/fact_packs.jsonl`
+- `data/processed/market_facts.jsonl`
+
+The current market export contains 34 location, 125 developer, and 429 project rollups backed by 12,733 compact listing snapshots. These are crawl-coverage figures, not claims that the export represents every developer or listing in Egypt.
 
 ## Optional OpenRouter configuration
 
