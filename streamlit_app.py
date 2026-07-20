@@ -90,6 +90,15 @@ def inject_styles(hero_uri: str) -> None:
         border: 1px solid rgba(255, 255, 255, 0.2);
     }}
 
+    .realista-hero::before {{
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+            linear-gradient(90deg, rgba(5, 18, 18, 0.28), rgba(5, 18, 18, 0.16) 52%, rgba(5, 18, 18, 0.04));
+        pointer-events: none;
+    }}
+
     .hero-copy {{
         width: min(650px, 100%);
         position: relative;
@@ -117,6 +126,7 @@ def inject_styles(hero_uri: str) -> None:
         font-weight: 800;
         letter-spacing: 0;
         margin: 28px 0 18px;
+        text-shadow: 0 3px 18px rgba(0, 0, 0, 0.74);
     }}
 
     .hero-subtitle {{
@@ -185,9 +195,29 @@ def inject_styles(hero_uri: str) -> None:
     }}
 
     div[data-testid="stFileUploader"] section {{
-        background: rgba(255, 255, 255, 0.82);
-        border: 1px dashed rgba(15, 118, 110, 0.45);
+        background: rgba(255, 255, 255, 0.96);
+        border: 1px dashed rgba(15, 118, 110, 0.72);
         border-radius: 8px;
+    }}
+
+    div[data-testid="stFileUploader"] label,
+    div[data-testid="stFileUploader"] p,
+    div[data-testid="stFileUploader"] small {{
+        color: var(--ink);
+        opacity: 1;
+    }}
+
+    div[data-testid="stFileUploader"] button {{
+        background: #0f211f;
+        color: #ffffff;
+        border: 1px solid #0f211f;
+        opacity: 1;
+    }}
+
+    div[data-testid="stFileUploader"] button:hover {{
+        background: var(--teal-dark);
+        color: #ffffff;
+        border-color: var(--teal-dark);
     }}
 
     div[data-testid="stTextInput"] input {{
