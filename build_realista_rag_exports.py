@@ -17,6 +17,8 @@ from collections import Counter
 import csv
 import json
 from pathlib import Path
+import re
+from statistics import mean, median
 
 
 APP_DIRECTORY = Path(__file__).resolve().parent
@@ -30,12 +32,15 @@ def main() -> None:
     rows = _load_classified_comments()
     capsules = [_row_to_capsule(row) for row in rows]
     fact_packs = _build_fact_packs(rows)
+    market_facts = _build_market_facts()
 
     _write_jsonl(LOCAL_PROCESSED / "evidence_capsules.jsonl", capsules)
     _write_jsonl(LOCAL_PROCESSED / "fact_packs.jsonl", fact_packs)
+    _write_jsonl(LOCAL_PROCESSED / "market_facts.jsonl", market_facts)
     print(
         "Wrote "
-        f"{len(capsules)} evidence capsules and {len(fact_packs)} fact packs "
+        f"{len(capsules)} evidence capsules, {len(fact_packs)} fact packs, "
+        f"and {len(market_facts)} market fact packs "
         f"to {LOCAL_PROCESSED}"
     )
 
@@ -155,6 +160,264 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     with path.open("w", encoding="utf-8", newline="\n") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _build_market_facts() -> list[dict]:
+    source_path = REALISTA_ROOT / "data" / "ingested" / "nawy_english_property500_controlled_20260718.json"
+    if not source_path.exists():
+        return []
+    data = json.loads(source_path.read_text(encoding="utf-8"))
+    records = _extract_market_records(data.get("items", []))
+    packs: list[dict] = [_market_overview(records, source_path)]
+
+    by_location: dict[str, list[dict]] = {}
+    by_location_unit: dict[tuple[str, str], list[dict]] = {}
+    by_developer: dict[str, list[dict]] = {}
+    for record in records:
+        by_location.setdefault(record["location"], []).append(record)
+        by_location_unit.setdefault(
+            (record["location"], record["unit_type"].casefold()), []
+        ).append(record)
+        if record["developer"] != "unknown":
+            by_developer.setdefault(record["developer"], []).append(record)
+
+    for location, rows in sorted(by_location.items()):
+        packs.append(_location_pack(location, rows))
+    for (location, unit_type), rows in sorted(by_location_unit.items()):
+        if len(rows) >= 3:
+            packs.append(_location_unit_pack(location, unit_type, rows))
+    for developer, rows in sorted(by_developer.items()):
+        if len(rows) >= 3:
+            packs.append(_developer_pack(developer, rows))
+    return packs
+
+
+def _extract_market_records(items: list[dict]) -> list[dict]:
+    records: list[dict] = []
+    seen = set()
+    for item in items:
+        if item.get("item_type") != "property":
+            continue
+        version = (item.get("versions") or {}).get("en") or {}
+        fields = version.get("fields") or {}
+        facts = fields.get("typed_market_facts") or []
+        title = str(item.get("title") or version.get("title") or "")
+        title_parts = _infer_title_parts(title)
+        for fact in facts:
+            if fact.get("fact_type") != "unit_total_price":
+                continue
+            if fact.get("market_trust_status") != "valid":
+                continue
+            price = _float(fact.get("total_price_egp"))
+            if price <= 0:
+                continue
+            unit_type = _clean_name(fact.get("unit_type") or title_parts.get("unit_type"))
+            location = _clean_name(fact.get("area_name") or title_parts.get("location"))
+            developer = _clean_name(fact.get("developer_name") or title_parts.get("developer"))
+            project = _clean_name(fact.get("project_name") or title_parts.get("project"))
+            if location.casefold() in {"area", "unknown", ""}:
+                location = title_parts.get("location", "unknown")
+            location = _canonical_location(location)
+            if developer.casefold() in {"developer", "developers", "unknown", ""}:
+                developer = title_parts.get("developer", "unknown")
+            if project.casefold() in {"compound", "project", "unknown", ""}:
+                project = title_parts.get("project", title[:80] or "unknown")
+            key = (item.get("canonical_url"), unit_type, location, developer, project, price)
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append(
+                {
+                    "property_url": item.get("canonical_url") or fact.get("source_url") or "",
+                    "title": title,
+                    "location": location,
+                    "developer": developer,
+                    "project": project,
+                    "unit_type": unit_type or "unknown",
+                    "total_price_egp": price,
+                    "area_sqm": _float(fact.get("area_sqm")) or None,
+                    "source": "nawy",
+                    "trust_status": fact.get("market_trust_status") or "valid",
+                }
+            )
+    return records
+
+
+def _infer_title_parts(title: str) -> dict[str, str]:
+    unit_types = [
+        "Apartment",
+        "Villa",
+        "Townhouse",
+        "Twinhouse",
+        "Chalet",
+        "Penthouse",
+        "Duplex",
+        "Studio",
+        "Office",
+        "Retail",
+        "Medical",
+        "Loft",
+        "Cabin",
+        "Family House",
+    ]
+    unit_type = next((kind for kind in unit_types if re.search(rf"\b{re.escape(kind)}\b", title, re.I)), "unknown")
+    project = "unknown"
+    location = "unknown"
+    developer = "unknown"
+    match = re.search(
+        r"for sale in (?P<project>.+?)(?:\s+-\s+|\s+with\s+.*?\s+in\s+)(?P<location>.+?)\s+by\s+(?P<developer>.+?)(?:\.|$)",
+        title,
+        re.I,
+    )
+    if match:
+        project = match.group("project")
+        location = match.group("location")
+        developer = match.group("developer")
+    else:
+        prefix = re.search(r"^(?:Delivery In \d{4}\s+)?(?P<location>.+?)\s+(?:Apartment|Villa|Townhouse|Twinhouse|Chalet|Penthouse|Duplex|Studio|Office|Retail|Medical|Loft|Cabin)", title, re.I)
+        if prefix:
+            location = prefix.group("location").split(",")[-1].strip()
+        by_match = re.search(r"\bby\s+(?P<developer>[^.]+?)(?:\.|$)", title, re.I)
+        if by_match:
+            developer = by_match.group("developer")
+        project_match = re.search(r"\b(?:Apartment|Villa|Townhouse|Twinhouse|Chalet|Penthouse|Duplex|Studio|Office|Retail|Medical|Loft|Cabin),\s*(?P<project>.+?)\s+\d+\s+Beds", title, re.I)
+        if project_match:
+            project = project_match.group("project")
+    return {
+        "unit_type": _clean_name(unit_type),
+        "project": _clean_name(project),
+        "location": _clean_name(location),
+        "developer": _clean_name(developer),
+    }
+
+
+def _market_overview(records: list[dict], source_path: Path) -> dict:
+    return {
+        "fact_pack_id": "market_overview_nawy_property500",
+        "evidence_type": "market_listing_aggregate",
+        "scope": "validated Nawy property observations in controlled property500 crawl",
+        "source_file": source_path.name,
+        "record_count": len(records),
+        "location_count": len({row["location"] for row in records}),
+        "developer_count": len({row["developer"] for row in records if row["developer"] != "unknown"}),
+        "unit_type_counts": _counter(row["unit_type"] for row in records),
+        "price_egp": _stats(row["total_price_egp"] for row in records),
+        "top_locations_by_observations": _top(_counter(row["location"] for row in records), 10),
+        "top_developers_by_observations": _top(_counter(row["developer"] for row in records if row["developer"] != "unknown"), 10),
+        "limitations": _market_limitations(),
+    }
+
+
+def _location_pack(location: str, rows: list[dict]) -> dict:
+    return {
+        "fact_pack_id": f"market_location_{_slug(location)}",
+        "evidence_type": "market_location_aggregate",
+        "location": location,
+        "record_count": len(rows),
+        "developer_count": len({row["developer"] for row in rows if row["developer"] != "unknown"}),
+        "project_count": len({row["project"] for row in rows if row["project"] != "unknown"}),
+        "developers": sorted({row["developer"] for row in rows if row["developer"] != "unknown"})[:25],
+        "projects": sorted({row["project"] for row in rows if row["project"] != "unknown"})[:25],
+        "unit_type_counts": _counter(row["unit_type"] for row in rows),
+        "price_egp": _stats(row["total_price_egp"] for row in rows),
+        "example_urls": [row["property_url"] for row in rows if row["property_url"]][:5],
+        "limitations": _market_limitations(),
+    }
+
+
+def _location_unit_pack(location: str, unit_type: str, rows: list[dict]) -> dict:
+    return {
+        "fact_pack_id": f"market_location_{_slug(location)}_{_slug(unit_type)}",
+        "evidence_type": "market_location_unit_aggregate",
+        "location": location,
+        "unit_type": unit_type,
+        "record_count": len(rows),
+        "developer_count": len({row["developer"] for row in rows if row["developer"] != "unknown"}),
+        "project_count": len({row["project"] for row in rows if row["project"] != "unknown"}),
+        "developers": sorted({row["developer"] for row in rows if row["developer"] != "unknown"})[:20],
+        "projects": sorted({row["project"] for row in rows if row["project"] != "unknown"})[:20],
+        "price_egp": _stats(row["total_price_egp"] for row in rows),
+        "example_urls": [row["property_url"] for row in rows if row["property_url"]][:5],
+        "limitations": _market_limitations(),
+    }
+
+
+def _developer_pack(developer: str, rows: list[dict]) -> dict:
+    return {
+        "fact_pack_id": f"market_developer_{_slug(developer)}",
+        "evidence_type": "market_developer_aggregate",
+        "developer": developer,
+        "record_count": len(rows),
+        "locations": sorted({row["location"] for row in rows if row["location"] != "unknown"})[:25],
+        "projects": sorted({row["project"] for row in rows if row["project"] != "unknown"})[:25],
+        "unit_type_counts": _counter(row["unit_type"] for row in rows),
+        "price_egp": _stats(row["total_price_egp"] for row in rows),
+        "example_urls": [row["property_url"] for row in rows if row["property_url"]][:5],
+        "limitations": _market_limitations(),
+    }
+
+
+def _stats(values) -> dict:
+    clean = sorted(float(value) for value in values if _float(value) > 0)
+    if not clean:
+        return {"count": 0, "min": None, "max": None, "mean": None, "median": None}
+    return {
+        "count": len(clean),
+        "min": round(clean[0], 2),
+        "max": round(clean[-1], 2),
+        "mean": round(mean(clean), 2),
+        "median": round(median(clean), 2),
+    }
+
+
+def _counter(values) -> dict:
+    return dict(sorted(Counter(values).items(), key=lambda item: (-item[1], str(item[0]))))
+
+
+def _top(counts: dict, limit: int) -> dict:
+    return dict(list(counts.items())[:limit])
+
+
+def _clean_name(value) -> str:
+    text = re.sub(r"\s+", " ", str(value or "unknown")).strip(" .,-")
+    return text or "unknown"
+
+
+def _canonical_location(value: str) -> str:
+    text = _clean_name(value)
+    lowered = text.casefold()
+    canonical_markers = [
+        ("new cairo", "New Cairo"),
+        ("6th of october", "6th of October City"),
+        ("6 october", "6th of October City"),
+        ("october gardens", "October Gardens"),
+        ("el sheikh zayed", "El Sheikh Zayed"),
+        ("sheikh zayed", "El Sheikh Zayed"),
+        ("new capital", "New Capital City"),
+        ("mostakbal", "Mostakbal City"),
+        ("north coast", "North Coast-Sahel"),
+        ("ras el hekma", "Ras El Hekma"),
+        ("ain sokhna", "Ain Sokhna"),
+        ("al dabaa", "Al Dabaa"),
+        ("al alamein", "Al Alamein"),
+    ]
+    for marker, canonical in canonical_markers:
+        if marker in lowered:
+            return canonical
+    return text
+
+
+def _slug(value: str) -> str:
+    text = re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+    return text or "unknown"
+
+
+def _market_limitations() -> list[str]:
+    return [
+        "Prices are asking/listed prices from Nawy observations, not verified transaction prices.",
+        "Statistics describe the local crawl/export only and may not cover the whole Egyptian market.",
+        "Use row counts and source URLs when judging reliability.",
+    ]
 
 
 def _count_scalar(rows: list[dict[str, str]], field: str) -> dict[str, int]:

@@ -24,6 +24,36 @@ COMMENT_TERMS = {
     "price",
     "pricing",
 }
+MARKET_TERMS = {
+    "area",
+    "areas",
+    "developer",
+    "developers",
+    "location",
+    "locations",
+    "market",
+    "mean",
+    "average",
+    "median",
+    "price",
+    "prices",
+    "pricing",
+    "project",
+    "projects",
+    "apartment",
+    "apartments",
+    "villa",
+    "villas",
+    "townhouse",
+    "townhouses",
+    "chalet",
+    "chalets",
+    "new",
+    "cairo",
+    "zayed",
+    "october",
+    "sahel",
+}
 FACT_PACK_TERMS = {
     "aggregate",
     "aggregates",
@@ -51,10 +81,29 @@ def retrieve_context(collection: Any, question: str, top_k: int = 4) -> list[dic
         return []
     query_terms = set(TOKEN_PATTERN.findall(question.casefold()))
     wants_fact_pack = bool(query_terms & FACT_PACK_TERMS)
-    wants_comment_evidence = bool(query_terms & COMMENT_TERMS) and not wants_fact_pack
+    requested_units = query_terms & {
+        "apartment",
+        "apartments",
+        "villa",
+        "villas",
+        "townhouse",
+        "townhouses",
+        "chalet",
+        "chalets",
+        "office",
+        "retail",
+        "penthouse",
+        "duplex",
+    }
+    wants_comment_evidence = (
+        bool(query_terms & COMMENT_TERMS)
+        and not wants_fact_pack
+        and not (query_terms & {"developer", "developers", "mean", "average", "median"})
+    )
+    wants_market_evidence = bool(query_terms & MARKET_TERMS) and not wants_comment_evidence
     candidate_count = (
         available
-        if wants_comment_evidence or wants_fact_pack
+        if wants_comment_evidence or wants_fact_pack or wants_market_evidence
         else min(max(1, top_k * 8), available)
     )
     result = collection.query(
@@ -93,7 +142,26 @@ def _rerank_for_realista(
 ) -> list[dict[str, object]]:
     query_terms = set(TOKEN_PATTERN.findall(question.casefold()))
     wants_fact_pack = bool(query_terms & FACT_PACK_TERMS)
-    wants_comment_evidence = bool(query_terms & COMMENT_TERMS) and not wants_fact_pack
+    requested_units = query_terms & {
+        "apartment",
+        "apartments",
+        "villa",
+        "villas",
+        "townhouse",
+        "townhouses",
+        "chalet",
+        "chalets",
+        "office",
+        "retail",
+        "penthouse",
+        "duplex",
+    }
+    wants_comment_evidence = (
+        bool(query_terms & COMMENT_TERMS)
+        and not wants_fact_pack
+        and not (query_terms & {"developer", "developers", "mean", "average", "median"})
+    )
+    wants_market_evidence = bool(query_terms & MARKET_TERMS) and not wants_comment_evidence
 
     def score(item: dict[str, object]) -> tuple[float, float]:
         text = f"{item.get('source_name', '')} {item.get('text', '')}".casefold()
@@ -101,6 +169,16 @@ def _rerank_for_realista(
         lexical_overlap = len(query_terms & text_terms)
         source_name = str(item.get("source_name", "")).casefold()
         evidence_boost = 0.0
+        if wants_market_evidence and "market fact pack" in source_name:
+            evidence_boost += 12.0
+            if query_terms & {"developer", "developers", "who"} and not requested_units:
+                evidence_boost += 5.0 if "unit type:" not in text else -4.0
+            for unit in requested_units:
+                singular = unit[:-1] if unit.endswith("s") else unit
+                if f"unit type: {singular}" in text:
+                    evidence_boost += 8.0
+                elif "unit type:" in text:
+                    evidence_boost -= 2.0
         if wants_fact_pack and "fact pack" in source_name:
             evidence_boost += 10.0
         if wants_comment_evidence and (
@@ -108,6 +186,24 @@ def _rerank_for_realista(
             or "evidence capsule social_comment" in source_name
         ):
             evidence_boost += 8.0
+            if "price" in query_terms and (
+                "price_question" in text or "objection labels: price" in text
+            ):
+                evidence_boost += 6.0
+            if "payment" in query_terms and (
+                "payment_question" in text or "payment_plan" in text
+            ):
+                evidence_boost += 6.0
+            if "delivery" in query_terms and (
+                "delivery_question" in text or "delivery_time" in text
+            ):
+                evidence_boost += 6.0
+            if "location" in query_terms and (
+                "location_question" in text or "objection labels: location" in text
+            ):
+                evidence_boost += 6.0
+            if "objection labels: none" in text and query_terms & {"price", "payment", "delivery", "location"}:
+                evidence_boost -= 3.0
         if "comment id:" in text:
             evidence_boost += 2.0
         if wants_comment_evidence and "annotation_guidelines" in source_name:

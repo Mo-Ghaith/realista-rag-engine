@@ -101,6 +101,10 @@ def _call_openrouter(prompt: str, timeout_seconds: int) -> str:
 
 
 def _local_rag_answer(question: str, retrieved: list[dict[str, object]]) -> str:
+    market_summary = _summarize_market_evidence(question, retrieved)
+    if market_summary:
+        return market_summary
+
     fact_pack_summary = _summarize_fact_pack_evidence(retrieved)
     if fact_pack_summary:
         return fact_pack_summary
@@ -110,6 +114,86 @@ def _local_rag_answer(question: str, retrieved: list[dict[str, object]]) -> str:
         return comment_summary
 
     return _extractive_answer(question, retrieved)
+
+
+def _summarize_market_evidence(
+    question: str, retrieved: list[dict[str, object]]
+) -> str:
+    market_items = [
+        item
+        for item in retrieved
+        if str(item.get("source_name", "")).startswith("Market fact pack")
+    ]
+    if not market_items:
+        return ""
+
+    grouped = _merge_by_source(market_items)
+    question_terms = set(TOKEN_PATTERN.findall(question.casefold()))
+    wants_developers = bool(question_terms & {"developer", "developers", "who"})
+    wants_price = bool(question_terms & {"mean", "average", "median", "price", "prices", "pricing"})
+
+    best = _best_market_pack(grouped, question)
+    text = str(best.get("text", ""))
+    citation = str(best["citation"])
+    pack_id = _field(text, "Market Fact Pack ID") or str(best.get("source_name", "market fact pack"))
+    location = _field(text, "Location")
+    developer = _field(text, "Developer")
+    unit_type = _field(text, "Unit Type")
+    record_count = _field(text, "Record Count")
+    price_stats = _parse_literal(_field(text, "Price Egp"))
+    developers = _as_list(_field(text, "Developers"))
+    projects = _as_list(_field(text, "Projects"))
+    locations = _as_list(_field(text, "Locations"))
+    limitations = _as_list(_field(text, "Limitations"))
+
+    subject = _market_subject(location, developer, unit_type, pack_id)
+    lines: list[str] = []
+
+    if wants_developers and developers:
+        shown = ", ".join(developers[:10])
+        lines.append(
+            f"For {location or subject}, Realista's Nawy market evidence shows "
+            f"{len(developers)} developer(s), including {shown} [{citation}]."
+        )
+        if projects:
+            lines.append(f"Example projects include {', '.join(projects[:8])} [{citation}].")
+    elif wants_price and isinstance(price_stats, dict):
+        lines.append(
+            f"For {subject}, the available Nawy listed-price evidence contains "
+            f"{price_stats.get('count', record_count)} observations [{citation}]."
+        )
+        lines.append(
+            "Listed price stats: "
+            f"mean {_money(price_stats.get('mean'))}, "
+            f"median {_money(price_stats.get('median'))}, "
+            f"minimum {_money(price_stats.get('min'))}, "
+            f"maximum {_money(price_stats.get('max'))} [{citation}]."
+        )
+        if developers:
+            lines.append(f"Developers represented include {', '.join(developers[:8])} [{citation}].")
+        if projects:
+            lines.append(f"Projects represented include {', '.join(projects[:8])} [{citation}].")
+    else:
+        lines.append(
+            f"Realista found a market fact pack for {subject} with "
+            f"{record_count or 'available'} observations [{citation}]."
+        )
+        if isinstance(price_stats, dict) and price_stats.get("count"):
+            lines.append(
+                f"Price range is {_money(price_stats.get('min'))} to "
+                f"{_money(price_stats.get('max'))}, with mean {_money(price_stats.get('mean'))} "
+                f"and median {_money(price_stats.get('median'))} [{citation}]."
+            )
+        if developers:
+            lines.append(f"Developers: {', '.join(developers[:10])} [{citation}].")
+        if projects:
+            lines.append(f"Projects: {', '.join(projects[:10])} [{citation}].")
+        if locations:
+            lines.append(f"Locations: {', '.join(locations[:10])} [{citation}].")
+
+    if limitations:
+        lines.append(f"Important limitation: {limitations[0]} [{citation}].")
+    return "\n".join(lines)
 
 
 def _extractive_answer(
@@ -151,12 +235,13 @@ def _summarize_comment_evidence(
     for item in comment_items[:4]:
         text = str(item.get("text", ""))
         comment_id = _field(text, "Comment ID") or str(item.get("source_name", "comment"))
+        sentiment = _field(text, "Sentiment") or "unclear"
         intent = _field(text, "Intent labels") or "unclear"
         objection = _field(text, "Objection labels") or "unclear"
         stage = _field(text, "Buyer stage") or "unclear"
         trust = _field(text, "Trust status") or "unknown"
         lines.append(
-            f"- `{comment_id}` has intent `{intent}`, objection `{objection}`, "
+            f"- `{comment_id}` is sentiment `{sentiment}`, with intent `{intent}`, objection `{objection}`, "
             f"buyer stage `{stage}`, and trust status `{trust}` [{item['citation']}]."
         )
     lines.append(
@@ -246,6 +331,62 @@ def _merge_by_source(items: list[dict[str, object]]) -> list[dict[str, object]]:
     return grouped
 
 
+def _best_market_pack(items: list[dict[str, object]], question: str) -> dict[str, object]:
+    terms = set(TOKEN_PATTERN.findall(question.casefold()))
+    requested_units = {
+        "apartment",
+        "apartments",
+        "villa",
+        "villas",
+        "townhouse",
+        "townhouses",
+        "chalet",
+        "chalets",
+        "office",
+        "retail",
+    } & terms
+    wants_developers = bool(terms & {"developer", "developers", "who"})
+    wants_price = bool(terms & {"mean", "average", "median", "price", "prices", "pricing"})
+
+    def score(item: dict[str, object]) -> tuple[int, int]:
+        text = str(item.get("source_name", "")) + " " + str(item.get("text", ""))
+        text_terms = set(TOKEN_PATTERN.findall(text.casefold()))
+        pack_id = _field(text, "Market Fact Pack ID").casefold()
+        unit_type = _field(text, "Unit Type")
+        specificity = 0
+        if "market_location_" in pack_id and not unit_type:
+            specificity += 6 if wants_developers and not requested_units else 2
+        if "market_location_" in pack_id and unit_type:
+            specificity += 3
+            if wants_price and requested_units:
+                specificity += 5
+            if wants_developers and not requested_units:
+                specificity -= 4
+        if "market_developer_" in pack_id:
+            specificity += 1
+        return (specificity, len(terms & text_terms))
+
+    return sorted(items, key=score, reverse=True)[0]
+
+
+def _market_subject(location: str, developer: str, unit_type: str, pack_id: str) -> str:
+    parts = []
+    if unit_type:
+        parts.append(unit_type)
+    if location:
+        parts.append(f"in {location}")
+    if developer:
+        parts.append(f"by {developer}")
+    return " ".join(parts) if parts else pack_id
+
+
+def _money(value) -> str:
+    try:
+        return f"{float(value):,.0f} EGP"
+    except (TypeError, ValueError):
+        return "unavailable"
+
+
 def _wanted_comment_labels(question: str) -> set[str]:
     terms = set(TOKEN_PATTERN.findall(question.casefold()))
     wanted: set[str] = set()
@@ -287,15 +428,31 @@ def _field(text: str, label: str) -> str:
         "Post ID",
         "Evidence type",
         "Fact pack ID",
+        "Market Fact Pack ID",
         "Scope",
+        "Location",
+        "Developer",
+        "Unit Type",
         "Row Count",
+        "Record Count",
+        "Location Count",
+        "Developer Count",
+        "Project Count",
         "Non Spam Count",
         "Review Required Count",
         "Duplicate Count",
+        "Developers",
+        "Projects",
+        "Locations",
         "Sentiment Counts",
         "Intent Counts",
         "Objection Counts",
         "Buyer Stage Counts",
+        "Unit Type Counts",
+        "Price Egp",
+        "Top Locations By Observations",
+        "Top Developers By Observations",
+        "Example Urls",
         "Evidence Comment Ids",
         "Examples By Label",
         "Limitations",

@@ -115,15 +115,23 @@ def load_realista_evidence_documents() -> list[dict[str, str]]:
         for path in _candidate_processed_paths("evidence_capsules.jsonl")
     )
     if capsules:
-        return capsules + load_realista_fact_pack_documents()
+        return capsules + load_realista_fact_pack_documents() + load_realista_market_documents()
 
     for csv_path in _candidate_processed_paths("classified_comments.csv"):
         if csv_path.exists():
-            return _load_classified_comments(csv_path) + load_realista_fact_pack_documents()
+            return (
+                _load_classified_comments(csv_path)
+                + load_realista_fact_pack_documents()
+                + load_realista_market_documents()
+            )
 
     for jsonl_path in _candidate_processed_paths("classified_comments.jsonl"):
         if jsonl_path.exists():
-            return _load_classified_comment_jsonl(jsonl_path) + load_realista_fact_pack_documents()
+            return (
+                _load_classified_comment_jsonl(jsonl_path)
+                + load_realista_fact_pack_documents()
+                + load_realista_market_documents()
+            )
 
     return []
 
@@ -147,6 +155,32 @@ def load_realista_fact_pack_documents() -> list[dict[str, str]]:
                         "source_name": f"Fact pack {fact_pack_id}",
                         "source_url": f"realista://fact_packs/{fact_pack_id}",
                         "text": _fact_pack_text(row),
+                    }
+                )
+        if documents:
+            return documents
+    return documents
+
+
+def load_realista_market_documents() -> list[dict[str, str]]:
+    """Load Realista market fact packs for Egyptian real-estate QA."""
+
+    documents: list[dict[str, str]] = []
+    for path in _candidate_processed_paths("market_facts.jsonl"):
+        if not path.exists() or path.stat().st_size == 0:
+            continue
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                pack_id = str(row.get("fact_pack_id") or f"market_pack_{line_number}")
+                documents.append(
+                    {
+                        "document_id": f"market_fact_{pack_id}",
+                        "source_name": f"Market fact pack {pack_id}",
+                        "source_url": f"realista://market_facts/{pack_id}",
+                        "text": _market_fact_text(row),
                     }
                 )
         if documents:
@@ -304,6 +338,35 @@ def _fact_pack_text(row: dict) -> str:
             lines.append(f"{key.replace('_', ' ').title()}: {row[key]}")
     if "evidence_comment_ids" in row:
         lines.append(f"Evidence Comment Ids: {row['evidence_comment_ids'][:10]}")
+    return "\n".join(lines)
+
+
+def _market_fact_text(row: dict) -> str:
+    lines = [
+        f"Market Fact Pack ID: {row.get('fact_pack_id')}",
+        f"Evidence type: {row.get('evidence_type')}",
+        f"Scope: {row.get('scope') or ''}",
+    ]
+    for key in [
+        "location",
+        "developer",
+        "unit_type",
+        "record_count",
+        "location_count",
+        "developer_count",
+        "project_count",
+        "developers",
+        "projects",
+        "locations",
+        "unit_type_counts",
+        "price_egp",
+        "top_locations_by_observations",
+        "top_developers_by_observations",
+    ]:
+        if key in row:
+            lines.append(f"{key.replace('_', ' ').title()}: {row[key]}")
+    if "limitations" in row:
+        lines.append(f"Limitations: {str(row['limitations'][0]) if row['limitations'] else ''}")
     return "\n".join(lines)
 
 

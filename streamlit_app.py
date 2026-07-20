@@ -346,9 +346,9 @@ with right:
     st.markdown('<div class="section-title">Suggested Tests</div>', unsafe_allow_html=True)
     st.markdown(
         """
-<div class="source-card"><strong>Fact pack</strong><br>Summarize the social comment fact pack counts.</div>
-<div class="source-card"><strong>Comment evidence</strong><br>What price or payment questions appear in the comments?</div>
-<div class="source-card"><strong>Guardrail</strong><br>Can Realista infer transaction prices from asking prices?</div>
+<div class="source-card"><strong>Market price</strong><br>What is the mean price of apartments in New Cairo?</div>
+<div class="source-card"><strong>Area developers</strong><br>Who are the developers in New Cairo?</div>
+<div class="source-card"><strong>Comment sentiment</strong><br>Based on comments, what are the sentiments toward price and payment?</div>
         """,
         unsafe_allow_html=True,
     )
