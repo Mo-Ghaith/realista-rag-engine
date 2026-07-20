@@ -23,7 +23,13 @@ def create_chroma_store(
         if persist_directory
         else chromadb.Client()
     )
-    collection = client.get_or_create_collection(
+    existing_names = {
+        item.name if hasattr(item, "name") else str(item)
+        for item in client.list_collections()
+    }
+    if collection_name in existing_names:
+        client.delete_collection(collection_name)
+    collection = client.create_collection(
         name=collection_name,
         metadata={"hnsw:space": "cosine", "description": "Realista RAG evidence chunks"},
         embedding_function=None,

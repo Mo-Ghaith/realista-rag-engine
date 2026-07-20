@@ -60,3 +60,41 @@ def test_new_cairo_query_returns_complete_developer_rollup() -> None:
     assert "2,330 latest listing snapshots" in result["answer"]
     assert all(name in result["answer"] for name in new_cairo["developers"])
     assert "Coverage limitation:" in result["answer"]
+
+
+def test_chroma_rebuild_removes_stale_chunks() -> None:
+    store_stage = importlib.import_module("05_create_chroma_store")
+    vector_stage = importlib.import_module("04_vector_representation")
+
+    first_chunks = vector_stage.vectorize_chunks(
+        [
+            {
+                "chunk_id": "stale-chunk",
+                "document_id": "stale-document",
+                "source_name": "Stale source",
+                "source_url": "local://stale",
+                "start_word": 0,
+                "text": "obsolete evidence",
+            },
+            {
+                "chunk_id": "current-chunk",
+                "document_id": "current-document",
+                "source_name": "Current source",
+                "source_url": "local://current",
+                "start_word": 0,
+                "text": "current evidence",
+            },
+        ]
+    )
+    _, initial = store_stage.create_chroma_store(
+        first_chunks,
+        collection_name="stale_chunk_regression",
+    )
+    assert initial.count() == 2
+
+    _, rebuilt = store_stage.create_chroma_store(
+        first_chunks[1:],
+        collection_name="stale_chunk_regression",
+    )
+    assert rebuilt.count() == 1
+    assert rebuilt.get()["ids"] == ["current-chunk"]
