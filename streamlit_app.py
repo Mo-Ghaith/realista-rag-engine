@@ -364,8 +364,9 @@ if run_query:
             st.error(str(exc))
         else:
             st.markdown('<div class="section-title">Answer</div>', unsafe_allow_html=True)
+            rendered_answer = html.escape(str(result["answer"])).replace("\n", "<br>")
             st.markdown(
-                f'<div class="answer-shell"><p>{html.escape(str(result["answer"]))}</p></div>',
+                f'<div class="answer-shell"><p>{rendered_answer}</p></div>',
                 unsafe_allow_html=True,
             )
             st.caption(
