@@ -1,0 +1,15 @@
+# Local and deployed secrets
+.env
+.env.*
+.streamlit/secrets.toml
+*api_key*
+*API_KEY*
+
+# Python caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Local vector database
+.chroma/
+**/.chroma/
