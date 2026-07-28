@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import sys
 
+import pytest
+
 
 APP_DIRECTORY = Path(__file__).resolve().parents[1]
 if str(APP_DIRECTORY) not in sys.path:
@@ -130,3 +132,34 @@ def test_chroma_rebuild_removes_stale_chunks() -> None:
     )
     assert rebuilt.count() == 1
     assert rebuilt.get()["ids"] == ["current-chunk"]
+
+
+def test_build_store_falls_back_when_chroma_runtime_is_incompatible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_stage = importlib.import_module("05_create_chroma_store")
+    documents = [
+        {
+            "document_id": "fallback-document",
+            "source_name": "Fallback source",
+            "source_url": "local://fallback",
+            "text": "New Cairo apartment asking prices",
+        }
+    ]
+
+    def fail_chroma(*args, **kwargs):
+        raise TypeError("simulated Python runtime incompatibility")
+
+    monkeypatch.setattr(store_stage, "create_chroma_store", fail_chroma)
+    with pytest.warns(RuntimeWarning, match="in-memory vector fallback"):
+        client, collection = store_stage.build_store_from_documents(documents)
+
+    assert client is None
+    assert collection.count() == 1
+    result = collection.query(
+        query_embeddings=[store_stage.vector_stage.embed_query("New Cairo apartment")],
+        n_results=1,
+        include=["documents", "metadatas", "distances"],
+    )
+    assert result["ids"][0]
+    assert result["documents"][0] == ["New Cairo apartment asking prices"]
