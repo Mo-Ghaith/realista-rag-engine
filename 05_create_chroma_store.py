@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 from pathlib import Path
 from typing import Any
@@ -56,13 +57,30 @@ def create_chroma_store(
 
 
 def build_store_from_documents(
-    documents: list[dict[str, str]], persist_directory: str | Path | None = None
+    documents: list[dict[str, str]],
+    persist_directory: str | Path | None = None,
+    chunk_size: int = 90,
+    overlap: int = 20,
+    collection_name: str | None = None,
 ) -> tuple[Any, Any]:
     preprocessing = importlib.import_module("02_preprocessing")
     chunking = importlib.import_module("03_chunking")
     processed = preprocessing.preprocess_documents(documents)
-    chunks = chunking.chunk_documents(processed)
-    return create_chroma_store(vector_stage.vectorize_chunks(chunks), persist_directory)
+    chunks = chunking.chunk_documents(processed, chunk_size=chunk_size, overlap=overlap)
+    if collection_name is None:
+        identity = "|".join(
+            f"{document.get('document_id')}:{len(str(document.get('text', '')))}"
+            for document in documents
+        )
+        digest = hashlib.sha256(
+            f"{chunk_size}:{overlap}:{identity}".encode("utf-8")
+        ).hexdigest()[:16]
+        collection_name = f"{COLLECTION_NAME}_{digest}"
+    return create_chroma_store(
+        vector_stage.vectorize_chunks(chunks),
+        persist_directory,
+        collection_name=collection_name,
+    )
 
 
 if __name__ == "__main__":

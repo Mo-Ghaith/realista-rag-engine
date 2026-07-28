@@ -1,0 +1,51 @@
+{
+  "capture_cutoff": "2026-07-26T08:53:08.904000",
+  "capture_start": "2026-07-18T17:11:46.291000",
+  "crawl_batch_ids": [
+    "20260718T171107Z",
+    "20260719T062456Z",
+    "20260726T074246Z"
+  ],
+  "entity_counts": {
+    "developers": 147,
+    "locations": 42,
+    "projects": 537,
+    "unit_types": 29
+  },
+  "field_coverage": {
+    "area_sqm": 13076,
+    "availability_status": 0,
+    "bathrooms": 0,
+    "bedrooms": 0,
+    "delivery": 0,
+    "down_payment": 0,
+    "finishing": 0,
+    "installment_years": 0,
+    "payment_plan": 0,
+    "price_per_sqm_egp": 13076,
+    "source_url": 13079,
+    "total_price_egp": 13079
+  },
+  "files": {
+    "nawy_listings.jsonl": {
+      "bytes": 17363023,
+      "rows": 13079,
+      "sha256": "3e2964b162cb96b93596fb1c203f5802d8f148d8d2c7ea60f3e679b766dad23c"
+    }
+  },
+  "generated_at": "2026-07-28T08:32:42.564476+00:00",
+  "limitations": [
+    "The release contains validated Nawy asking-price observations, not transaction prices.",
+    "A missing field means it was not present in the normalized scrape and must not be inferred.",
+    "The release represents the authorized crawl coverage at its recorded cutoff."
+  ],
+  "listing_count": 13079,
+  "release_id": "nawy_2026-07-26",
+  "schema_version": "realista_nawy_rag_release_v1",
+  "source": "nawy",
+  "source_collection": "listing_snapshots",
+  "source_row_count": 13080,
+  "status": "complete",
+  "superseded_observation_count": 1,
+  "timezone": "Africa/Cairo"
+}

@@ -25,6 +25,9 @@ Answer the user's question using only the retrieved context below.
 Write a concise, useful answer for a real-estate analyst.
 Do not dump raw JSON, Python dictionaries, or source fields unless the user asks for raw records.
 If the evidence is aggregate, summarize the main pattern, then mention limitations.
+If a retrieved item contains "Prepared answer", preserve its calculations and
+abstention exactly; you may improve wording but must not change numbers, filters,
+release dates, or the difference between missing evidence and a zero result.
 When the user asks which developers or projects are in a location, list every name
 present in the retrieved location aggregate and report its coverage count. Do not
 shorten a complete aggregate list to examples.
@@ -44,6 +47,8 @@ def answer_question(
     question: str,
     retrieved: list[dict[str, object]],
     timeout_seconds: int = 45,
+    model: str | None = None,
+    temperature: float = 0,
 ) -> dict[str, object]:
     if not retrieved:
         return {
@@ -55,8 +60,17 @@ def answer_question(
 
     prompt = build_prompt(question, retrieved)
     if OPENROUTER_API_KEY:
-        answer = _call_openrouter(prompt, timeout_seconds)
-        mode = "openrouter"
+        answer = _call_openrouter(
+            prompt,
+            timeout_seconds,
+            model=model or OPENROUTER_MODEL,
+            temperature=temperature,
+        )
+        if not _answer_is_grounded(answer, retrieved):
+            answer = _local_rag_answer(question, retrieved)
+            mode = "openrouter_rejected_local_fallback"
+        else:
+            mode = "openrouter"
     else:
         answer = _local_rag_answer(question, retrieved)
         mode = "local_synthesized_rag"
@@ -78,11 +92,16 @@ def answer_question(
     }
 
 
-def _call_openrouter(prompt: str, timeout_seconds: int) -> str:
+def _call_openrouter(
+    prompt: str,
+    timeout_seconds: int,
+    model: str,
+    temperature: float,
+) -> str:
     payload = json.dumps(
         {
-            "model": OPENROUTER_MODEL,
-            "temperature": 0,
+            "model": model,
+            "temperature": temperature,
             "messages": [{"role": "user", "content": prompt}],
         }
     ).encode("utf-8")
@@ -104,6 +123,17 @@ def _call_openrouter(prompt: str, timeout_seconds: int) -> str:
 
 
 def _local_rag_answer(question: str, retrieved: list[dict[str, object]]) -> str:
+    prepared = next(
+        (
+            str(item.get("prepared_answer"))
+            for item in retrieved
+            if item.get("prepared_answer")
+        ),
+        "",
+    )
+    if prepared:
+        return prepared
+
     market_summary = _summarize_market_evidence(question, retrieved)
     if market_summary:
         return market_summary
@@ -117,6 +147,38 @@ def _local_rag_answer(question: str, retrieved: list[dict[str, object]]) -> str:
         return comment_summary
 
     return _extractive_answer(question, retrieved)
+
+
+def _answer_is_grounded(
+    answer: str, retrieved: list[dict[str, object]]
+) -> bool:
+    """Reject missing/unknown citations and unsupported numeric claims."""
+
+    allowed = {str(item.get("citation")) for item in retrieved}
+    cited = set(re.findall(r"\[([A-Za-z]\d+)\]", str(answer)))
+    if not cited or not cited.issubset(allowed):
+        return False
+
+    context = " ".join(str(item.get("text", "")) for item in retrieved)
+    context_numbers = {_normalized_number(value) for value in _numbers(context)}
+    answer_numbers = {
+        _normalized_number(value)
+        for value in _numbers(re.sub(r"\[[A-Za-z]\d+\]", "", str(answer)))
+    }
+    return answer_numbers.issubset(context_numbers)
+
+
+def _numbers(value: str) -> list[str]:
+    return re.findall(r"(?<![\w])\d[\d,]*(?:\.\d+)?", value)
+
+
+def _normalized_number(value: str) -> str:
+    clean = value.replace(",", "")
+    try:
+        number = float(clean)
+    except ValueError:
+        return clean
+    return f"{number:.8f}".rstrip("0").rstrip(".")
 
 
 def _summarize_market_evidence(
@@ -139,6 +201,13 @@ def _summarize_market_evidence(
     text = str(best.get("text", ""))
     citation = str(best["citation"])
     pack_id = _field(text, "Market Fact Pack ID") or str(best.get("source_name", "market fact pack"))
+    entity_type = str(best.get("entity_type", "")).casefold()
+    if _needs_specific_market_match(question) and not _market_pack_matches_question(best, question):
+        return (
+            "I do not have that specific market entity in the retrieved Nawy knowledge base. "
+            "Try a location, developer, or project name that exists in the scraped rollups, "
+            "or ask for the available coverage list."
+        )
     location = _field(text, "Location")
     developer = _field(text, "Developer")
     unit_type = _field(text, "Unit Type")
@@ -155,7 +224,31 @@ def _summarize_market_evidence(
     subject = _market_subject(location, developer, unit_type, pack_id)
     lines: list[str] = []
 
-    if wants_developers and developers:
+    if entity_type == "overview":
+        location_count = _field(text, "Location Count") or str(len(locations))
+        developer_count = _field(text, "Developer Count") or str(len(developers))
+        project_count = _field(text, "Project Count") or str(len(projects))
+        lines.append(
+            f"The Nawy knowledge base currently has {location_count} locations, "
+            f"{developer_count} developers, and {project_count} projects in validated compact rollups [{citation}]."
+        )
+        if locations:
+            lines.extend(["", "Locations:"])
+            for start in range(0, len(locations), 6):
+                lines.append(f"- {', '.join(locations[start:start + 6])} [{citation}]")
+        if developers and "developer" in question_terms:
+            lines.extend(["", "Developers:"])
+            for start in range(0, min(len(developers), 60), 4):
+                lines.append(f"- {', '.join(developers[start:start + 4])} [{citation}]")
+            if len(developers) > 60:
+                lines.append(f"- plus {len(developers) - 60} more developer names in the same overview [{citation}]")
+        if projects and "project" in question_terms:
+            lines.extend(["", "Projects:"])
+            for start in range(0, min(len(projects), 60), 4):
+                lines.append(f"- {', '.join(projects[start:start + 4])} [{citation}]")
+            if len(projects) > 60:
+                lines.append(f"- plus {len(projects) - 60} more project names in the same overview [{citation}]")
+    elif wants_developers and developers:
         covered_snapshots = record_count
         if isinstance(source_coverage, dict):
             covered_snapshots = str(source_coverage.get("listing_snapshot_count") or record_count)
@@ -221,6 +314,38 @@ def _summarize_market_evidence(
             lines.append("")
             lines.append(f"Coverage limitation: {limitations[1]} [{citation}].")
     return "\n".join(lines)
+
+
+def _needs_specific_market_match(question: str) -> bool:
+    terms = set(TOKEN_PATTERN.findall(question.casefold()))
+    overview_terms = {"all", "coverage", "covered", "available", "list"}
+    if terms & overview_terms:
+        return False
+    return bool(terms & {"area", "areas", "developer", "developers", "location", "project", "projects", "compound", "compounds"})
+
+
+def _market_pack_matches_question(item: dict[str, object], question: str) -> bool:
+    entity_type = str(item.get("entity_type", "")).casefold()
+    if entity_type == "overview":
+        return True
+    question_text = question.casefold()
+    entity_name = str(item.get("entity_name", "")).casefold().strip()
+    if entity_name and entity_name in question_text:
+        return True
+    text = str(item.get("text", ""))
+    for label in ["Name", "Name En", "Name Ar", "Location", "Developer", "Project"]:
+        value = _field(text, label).casefold().strip()
+        if value and value in question_text:
+            return True
+    entity_terms = {
+        term
+        for term in TOKEN_PATTERN.findall(entity_name)
+        if term not in {"city", "the", "of", "and", "for", "in"}
+    }
+    question_terms = set(TOKEN_PATTERN.findall(question_text))
+    if entity_terms and len(entity_terms & question_terms) >= min(2, len(entity_terms)):
+        return True
+    return False
 
 
 def _extractive_answer(

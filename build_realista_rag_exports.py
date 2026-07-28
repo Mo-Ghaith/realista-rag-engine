@@ -6,6 +6,8 @@ This script copies the evidence that the RAG app needs into local JSONL files:
 - `data/processed/evidence_capsules.jsonl`
 - `data/processed/fact_packs.jsonl`
 - `data/processed/market_facts.jsonl`
+- `data/processed/nawy_listings.jsonl`
+- `data/processed/nawy_release_manifest.json`
 
 The exports deliberately preserve trust and review fields. Review-required
 comments can be cited as evidence of model output, but not as final market truth.
@@ -22,6 +24,8 @@ import os
 from pathlib import Path
 import re
 from statistics import mean, median
+
+from nawy_release import export_release_from_database
 
 
 APP_DIRECTORY = Path(__file__).resolve().parent
@@ -46,6 +50,17 @@ def main() -> None:
         default="auto",
         help="Use validated Mongo rollups when available, or the older controlled export.",
     )
+    parser.add_argument(
+        "--release-status",
+        choices=("complete", "partial"),
+        default="complete",
+        help="Status recorded in the static Nawy release manifest.",
+    )
+    parser.add_argument(
+        "--snapshot-collection",
+        default=None,
+        help="Override the Mongo snapshot collection used for the record-level release.",
+    )
     args = parser.parse_args()
 
     LOCAL_PROCESSED.mkdir(parents=True, exist_ok=True)
@@ -53,6 +68,12 @@ def main() -> None:
     capsules = [_row_to_capsule(row) for row in rows]
     fact_packs = _build_fact_packs(rows)
     market_facts, market_source = _build_market_facts(args.market_source)
+    release_manifest = None
+    if args.market_source in {"auto", "mongo"}:
+        release_manifest = _export_record_release(
+            status=args.release_status,
+            snapshot_collection=args.snapshot_collection,
+        )
 
     _write_jsonl(LOCAL_PROCESSED / "evidence_capsules.jsonl", capsules)
     _write_jsonl(LOCAL_PROCESSED / "fact_packs.jsonl", fact_packs)
@@ -63,6 +84,44 @@ def main() -> None:
         f"and {len(market_facts)} market fact packs "
         f"from {market_source} to {LOCAL_PROCESSED}"
     )
+    if release_manifest:
+        print(
+            "Nawy release "
+            f"{release_manifest['release_id']}: {release_manifest['listing_count']} "
+            f"latest validated listings ({release_manifest['status']})."
+        )
+
+
+def _export_record_release(
+    *,
+    status: str,
+    snapshot_collection: str | None,
+) -> dict:
+    try:
+        from dotenv import load_dotenv
+    except ImportError:
+        load_dotenv = None
+    if load_dotenv:
+        load_dotenv(REALISTA_ROOT / ".env")
+    mongo_uri = os.getenv("MONGO_URI", "").strip()
+    if not mongo_uri:
+        raise RuntimeError("MONGO_URI is required for the record-level Nawy release.")
+    try:
+        from pymongo import MongoClient
+    except ImportError as exc:
+        raise ImportError("pymongo is required to build the Nawy release") from exc
+
+    client = MongoClient(mongo_uri, serverSelectionTimeoutMS=10_000)
+    try:
+        database = client[os.getenv("MONGO_DB", "Realista")]
+        return export_release_from_database(
+            database,
+            LOCAL_PROCESSED,
+            snapshot_collection=snapshot_collection,
+            release_status=status,
+        )
+    finally:
+        client.close()
 
 
 def _load_classified_comments() -> list[dict[str, str]]:
@@ -192,7 +251,9 @@ def _build_market_facts(source: str = "auto") -> tuple[list[dict], str]:
             rollups = []
             print(f"Validated Mongo rollups unavailable; using controlled export: {exc}")
         if rollups:
-            return [_market_rollup_pack(kind, row) for kind, row in rollups], "validated Mongo rollups"
+            packs = [_market_rollup_pack(kind, row) for kind, row in rollups]
+            packs.insert(0, _market_corpus_overview_pack(packs))
+            return packs, "validated Mongo rollups"
     return _build_controlled_market_facts(), "controlled property export"
 
 
@@ -220,10 +281,14 @@ def _load_market_rollups_from_mongo() -> list[tuple[str, dict]]:
         if missing:
             raise RuntimeError(f"Missing validated rollup collections: {', '.join(missing)}")
 
-        rollups: list[tuple[str, dict]] = []
+        rows_by_entity_type: dict[str, list[dict]] = {}
         for collection_name, entity_type, id_field in MARKET_ROLLUP_COLLECTIONS:
             cursor = database[collection_name].find({}, {"_id": 0}).sort(id_field, 1)
-            rollups.extend((entity_type, row) for row in cursor if row.get(id_field))
+            rows_by_entity_type[entity_type] = [row for row in cursor if row.get(id_field)]
+        _enrich_rollup_display_names(rows_by_entity_type)
+        rollups: list[tuple[str, dict]] = []
+        for _, entity_type, _ in MARKET_ROLLUP_COLLECTIONS:
+            rollups.extend((entity_type, row) for row in rows_by_entity_type.get(entity_type, []))
         return rollups
     except RuntimeError:
         raise
@@ -231,6 +296,77 @@ def _load_market_rollups_from_mongo() -> list[tuple[str, dict]]:
         raise RuntimeError(f"Could not read validated Mongo rollups: {exc}") from exc
     finally:
         client.close()
+
+
+def _enrich_rollup_display_names(rows_by_entity_type: dict[str, list[dict]]) -> None:
+    developer_names = {
+        str(row.get("developer_id")): _clean_name(row.get("name_en") or row.get("name") or row.get("name_ar"))
+        for row in rows_by_entity_type.get("developer", [])
+        if row.get("developer_id")
+    }
+    project_names = {
+        str(row.get("project_id")): _clean_name(row.get("name_en") or row.get("name") or row.get("name_ar"))
+        for row in rows_by_entity_type.get("project", [])
+        if row.get("project_id")
+    }
+    location_names = {
+        str(row.get("location_id")): _clean_name(row.get("name_en") or row.get("name") or row.get("name_ar"))
+        for row in rows_by_entity_type.get("location", [])
+        if row.get("location_id")
+    }
+
+    for row in rows_by_entity_type.get("location", []):
+        row["developers"] = _names_from_ids(
+            row.get("developer_ids"),
+            row.get("developers"),
+            developer_names,
+        )
+        row["projects"] = _names_from_ids(
+            row.get("project_ids"),
+            row.get("projects"),
+            project_names,
+        )
+    for row in rows_by_entity_type.get("developer", []):
+        row["known_projects"] = _names_from_ids(
+            row.get("project_ids"),
+            row.get("known_projects"),
+            project_names,
+        )
+        row["locations"] = _names_from_ids(
+            row.get("location_ids"),
+            row.get("locations"),
+            location_names,
+        )
+    for row in rows_by_entity_type.get("project", []):
+        row["developer_name"] = developer_names.get(str(row.get("developer_id"))) or row.get("developer_name")
+        row["locations"] = _names_from_ids(
+            row.get("location_ids"),
+            row.get("locations"),
+            location_names,
+        )
+
+
+def _names_from_ids(ids, fallback_names, name_map: dict[str, str]) -> list[str]:
+    names = []
+    for index, entity_id in enumerate(ids or []):
+        fallback = ""
+        if isinstance(fallback_names, list) and index < len(fallback_names):
+            fallback = str(fallback_names[index] or "")
+        name = name_map.get(str(entity_id)) or fallback
+        if not str(name or "").strip():
+            continue
+        clean = _clean_name(name)
+        if clean and clean.casefold() != "unknown" and clean not in names:
+            names.append(clean)
+    if names:
+        return names
+    return [
+        clean
+        for name in fallback_names or []
+        if str(name or "").strip()
+        for clean in [_clean_name(name)]
+        if clean.casefold() != "unknown"
+    ]
 
 
 def _market_rollup_pack(entity_type: str, row: dict) -> dict:
@@ -314,6 +450,47 @@ def _market_rollup_pack(entity_type: str, row: dict) -> dict:
             }
         )
     return pack
+
+
+def _market_corpus_overview_pack(packs: list[dict]) -> dict:
+    locations = sorted(pack["name"] for pack in packs if pack.get("entity_type") == "location")
+    developers = sorted(pack["name"] for pack in packs if pack.get("entity_type") == "developer")
+    projects = sorted(pack["name"] for pack in packs if pack.get("entity_type") == "project")
+    latest_values = [
+        (pack.get("capture_window") or {}).get("latest_observed_at")
+        for pack in packs
+        if (pack.get("capture_window") or {}).get("latest_observed_at")
+    ]
+    return {
+        "fact_pack_id": "market_overview_complete_nawy_rollups",
+        "analysis_version": MARKET_ANALYSIS_VERSION,
+        "evidence_type": "market_corpus_overview",
+        "entity_type": "overview",
+        "entity_id": "complete_nawy_rollups",
+        "name": "Complete Nawy rollup coverage overview",
+        "record_count": sum(int(pack.get("record_count") or 0) for pack in packs if pack.get("entity_type") == "location"),
+        "location_count": len(locations),
+        "developer_count": len(developers),
+        "project_count": len(projects),
+        "locations": locations,
+        "developers": developers,
+        "projects": projects,
+        "capture_window": {
+            "latest_observed_at": max(latest_values) if latest_values else None,
+        },
+        "source_coverage": {
+            "rollup_count": len(packs),
+            "location_count": len(locations),
+            "developer_count": len(developers),
+            "project_count": len(projects),
+        },
+        "market_trust_status": "valid",
+        "limitations": [
+            "This overview lists compact validated Nawy rollups available in the Realista knowledge base.",
+            "Ask for a specific location, developer, or project to retrieve its detailed rollup.",
+            "If a requested entity is absent from these rollups, the app should report that it does not have that information in its knowledge base.",
+        ],
+    }
 
 
 def _json_value(value):

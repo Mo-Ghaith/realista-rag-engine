@@ -25,8 +25,12 @@ COMMENT_TERMS = {
     "pricing",
 }
 MARKET_TERMS = {
+    "all",
     "area",
     "areas",
+    "compound",
+    "compounds",
+    "coverage",
     "developer",
     "developers",
     "location",
@@ -72,7 +76,12 @@ FACT_PACK_TERMS = {
 }
 
 
-def retrieve_context(collection: Any, question: str, top_k: int = 4) -> list[dict[str, object]]:
+def retrieve_context(
+    collection: Any,
+    question: str,
+    top_k: int = 4,
+    candidate_multiplier: int = 8,
+) -> list[dict[str, object]]:
     question = str(question or "").strip()
     if not question:
         return []
@@ -101,11 +110,15 @@ def retrieve_context(collection: Any, question: str, top_k: int = 4) -> list[dic
         and not (query_terms & {"developer", "developers", "mean", "average", "median"})
     )
     wants_market_evidence = bool(query_terms & MARKET_TERMS) and not wants_comment_evidence
-    candidate_count = (
-        available
-        if wants_comment_evidence or wants_fact_pack or wants_market_evidence
-        else min(max(1, top_k * 8), available)
-    )
+    wants_market_overview = bool(query_terms & {"all", "coverage", "covered", "available"})
+    if wants_market_overview:
+        candidate_count = available
+    else:
+        pool_floor = 96 if wants_market_evidence else 48
+        candidate_count = min(
+            max(pool_floor, top_k * max(1, candidate_multiplier)),
+            available,
+        )
     result = collection.query(
         query_embeddings=[vector_stage.embed_query(question)],
         n_results=candidate_count,
@@ -162,6 +175,7 @@ def _rerank_for_realista(
         and not (query_terms & {"developer", "developers", "mean", "average", "median"})
     )
     wants_market_evidence = bool(query_terms & MARKET_TERMS) and not wants_comment_evidence
+    wants_market_overview = bool(query_terms & {"all", "coverage", "covered", "available"})
     wants_developer_list = bool(query_terms & {"developer", "developers", "who"}) and not requested_units
 
     def score(item: dict[str, object]) -> tuple[float, float]:
@@ -174,6 +188,8 @@ def _rerank_for_realista(
             evidence_boost += 12.0
             entity_type = str(item.get("entity_type", "")).casefold()
             entity_name = str(item.get("entity_name", "")).casefold()
+            if wants_market_overview:
+                evidence_boost += 26.0 if entity_type == "overview" else -2.0
             if wants_developer_list:
                 evidence_boost += 5.0 if "unit type:" not in text else -4.0
                 if entity_type == "location":

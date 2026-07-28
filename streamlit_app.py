@@ -18,7 +18,7 @@ if str(APP_DIRECTORY) not in sys.path:
 
 importlib.invalidate_caches()
 stage_modules = {
-    name: importlib.reload(importlib.import_module(name))
+    name: importlib.import_module(name)
     for name in (
         "01_documents",
         "02_preprocessing",
@@ -27,12 +27,14 @@ stage_modules = {
         "05_create_chroma_store",
         "06_retrieve_context",
         "07_prompting",
+        "08_market_query",
     )
 }
 documents_stage = stage_modules["01_documents"]
 store_stage = stage_modules["05_create_chroma_store"]
 retrieval_stage = stage_modules["06_retrieve_context"]
 rag = stage_modules["07_prompting"]
+market_query = stage_modules["08_market_query"]
 
 try:
     if not rag.OPENROUTER_API_KEY:
@@ -40,6 +42,27 @@ try:
     rag.OPENROUTER_MODEL = st.secrets.get("OPENROUTER_MODEL", rag.OPENROUTER_MODEL)
 except Exception:
     pass
+
+
+@st.cache_resource(show_spinner="Loading the complete Nawy release…")
+def load_market_state() -> dict:
+    return market_query.load_market_state()
+
+
+@st.cache_resource(show_spinner="Building the evidence index…")
+def load_base_rag_index(
+    chunk_size: int,
+    overlap: int,
+    release_id: str,
+) -> tuple[list[dict], object]:
+    del release_id  # Included in the cache key so a refreshed release rebuilds.
+    documents = documents_stage.load_documents()
+    _, collection = store_stage.build_store_from_documents(
+        documents,
+        chunk_size=chunk_size,
+        overlap=overlap,
+    )
+    return documents, collection
 
 
 def image_data_uri(path: Path) -> str:
@@ -359,9 +382,9 @@ st.markdown(
         <div class="eyebrow">Evidence-bounded real-estate intelligence</div>
         <h1 class="hero-title">Realista RAG Engine</h1>
         <p class="hero-subtitle">
-            Ask questions across Realista project rules, social-comment evidence capsules,
-            and aggregate fact packs. Every answer is grounded in retrieved context and
-            returned with traceable citations.
+            Ask exact questions across the complete packaged Nawy release and its
+            evidence packs. Structured calculations use record-level rows; generated
+            answers stay grounded in retrieved evidence and traceable citations.
         </p>
         <div class="hero-tags">
             <span>Egyptian market context</span>
@@ -380,6 +403,71 @@ uploaded_files = st.file_uploader(
     type=["txt", "md"],
     accept_multiple_files=True,
 )
+
+with st.sidebar:
+    st.header("RAG Settings")
+    chunk_size = st.slider(
+        "Chunk size",
+        min_value=50,
+        max_value=220,
+        value=90,
+        step=10,
+        help="Words per chunk before embedding. Smaller chunks are precise; larger chunks carry more context.",
+    )
+    max_overlap = max(0, chunk_size - 10)
+    overlap_default = min(20, max_overlap)
+    overlap = st.slider(
+        "Chunk overlap",
+        min_value=0,
+        max_value=max_overlap,
+        value=overlap_default,
+        step=5,
+        help="Repeated words between neighboring chunks.",
+    )
+    top_k = st.slider(
+        "Retrieved chunks",
+        min_value=1,
+        max_value=12,
+        value=4,
+        help="Final number of chunks sent to the answer step.",
+    )
+    candidate_multiplier = st.slider(
+        "Rerank pool",
+        min_value=2,
+        max_value=20,
+        value=8,
+        help="How many vector matches are considered before Realista-specific reranking.",
+    )
+
+    st.header("LLM Settings")
+    llm_enabled = st.toggle(
+        "Use OpenRouter LLM",
+        value=bool(rag.OPENROUTER_API_KEY),
+        disabled=not bool(rag.OPENROUTER_API_KEY),
+        help="Configure OPENROUTER_API_KEY in Streamlit secrets or the environment to enable generated responses.",
+    )
+    llm_model = st.text_input(
+        "Model",
+        value=rag.OPENROUTER_MODEL,
+        disabled=not llm_enabled,
+    )
+    temperature = st.slider(
+        "Temperature",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.0,
+        step=0.05,
+        disabled=not llm_enabled,
+    )
+    timeout_seconds = st.slider(
+        "LLM timeout",
+        min_value=10,
+        max_value=90,
+        value=45,
+        step=5,
+        disabled=not llm_enabled,
+    )
+
 uploads = []
 for uploaded in uploaded_files:
     try:
@@ -387,9 +475,25 @@ for uploaded in uploaded_files:
     except UnicodeDecodeError:
         st.warning(f"Skipped {uploaded.name}: the file is not valid UTF-8.")
 
-documents = documents_stage.load_documents()
-documents.extend(documents_stage.documents_from_uploads(uploads))
-_, collection = store_stage.build_store_from_documents(documents)
+market_state = load_market_state()
+release_manifest = market_state.get("manifest") or {}
+release_id = str(release_manifest.get("release_id") or "no_release")
+base_documents, base_collection = load_base_rag_index(
+    chunk_size,
+    overlap,
+    release_id,
+)
+if uploads:
+    documents = list(base_documents)
+    documents.extend(documents_stage.documents_from_uploads(uploads))
+    _, collection = store_stage.build_store_from_documents(
+        documents,
+        chunk_size=chunk_size,
+        overlap=overlap,
+    )
+else:
+    documents = base_documents
+    collection = base_collection
 market_counts = {
     entity_type: sum(
         document.get("document_type") == "market_fact"
@@ -404,12 +508,19 @@ metric_row(
     market_count=sum(market_counts.values()),
     mode="OpenRouter" if rag.OPENROUTER_API_KEY else "Local",
 )
+release_status = str(release_manifest.get("status") or "missing")
+release_cutoff = str(release_manifest.get("capture_cutoff") or "unavailable").replace("T", " ").split(".", 1)[0]
+listing_count = int(release_manifest.get("listing_count") or 0)
 st.markdown(
     f"""
 <div class="coverage-strip">
     Validated Nawy coverage: <strong>{market_counts['location']} locations</strong> &middot;
     <strong>{market_counts['developer']} developers</strong> &middot;
-    <strong>{market_counts['project']} projects</strong>
+    <strong>{market_counts['project']} projects</strong> &middot;
+    <strong>{listing_count:,} latest units</strong><br>
+    Active release: <strong>{release_id}</strong> &middot;
+    cutoff <strong>{release_cutoff}</strong> &middot;
+    status <strong>{release_status}</strong>
 </div>
     """,
     unsafe_allow_html=True,
@@ -419,15 +530,14 @@ left, right = st.columns([1.12, 0.88], gap="large")
 with left:
     st.markdown('<div class="section-title">Ask The Evidence</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="section-note">Try a market-rule, comment-label, or fact-pack question.</div>',
+        '<div class="section-note">Ask about scraped prices, areas, units, developers, projects, locations, or coverage.</div>',
         unsafe_allow_html=True,
     )
     question = st.text_input(
         "Question",
-        placeholder="What price or payment questions appear in the comments?",
+        placeholder="What is the average price of apartments in New Cairo?",
         label_visibility="collapsed",
     )
-    top_k = st.slider("Retrieved chunks", min_value=1, max_value=6, value=4)
     run_query = st.button("Retrieve and answer", type="primary", use_container_width=True)
 
 with right:
@@ -436,7 +546,8 @@ with right:
         """
 <div class="source-card"><strong>Market price</strong><br>What is the mean price of apartments in New Cairo?</div>
 <div class="source-card"><strong>Area developers</strong><br>Who are the developers in New Cairo?</div>
-<div class="source-card"><strong>Comment sentiment</strong><br>Based on comments, what are the sentiments toward price and payment?</div>
+<div class="source-card"><strong>Exact filter</strong><br>How many apartments in New Cairo are under 10 million?</div>
+<div class="source-card"><strong>Missing evidence</strong><br>What is the delivery date for apartments in New Cairo?</div>
         """,
         unsafe_allow_html=True,
     )
@@ -445,9 +556,28 @@ if run_query:
     if not question.strip():
         st.warning("Enter a question first.")
     else:
-        retrieved = retrieval_stage.retrieve_context(collection, question, top_k=top_k)
+        structured = market_query.query_market(question, market_state)
+        if structured.get("status") in {"answered", "insufficient"}:
+            retrieved = structured["retrieved"]
+        else:
+            retrieved = retrieval_stage.retrieve_context(
+                collection,
+                question,
+                top_k=top_k,
+                candidate_multiplier=candidate_multiplier,
+            )
         try:
-            result = rag.answer_question(question, retrieved)
+            force_local = structured.get("status") == "insufficient"
+            if not llm_enabled or force_local:
+                original_key = rag.OPENROUTER_API_KEY
+                rag.OPENROUTER_API_KEY = ""
+            result = rag.answer_question(
+                question,
+                retrieved,
+                timeout_seconds=timeout_seconds,
+                model=llm_model,
+                temperature=temperature,
+            )
         except RuntimeError as exc:
             st.error(str(exc))
         else:
@@ -456,7 +586,8 @@ if run_query:
                 st.markdown(str(result["answer"]))
             st.caption(
                 f"Mode: {result['mode']} | "
-                f"Retrieved context used: {result['used_retrieved_context']}"
+                f"Retrieved context used: {result['used_retrieved_context']} | "
+                f"Release: {release_id}"
             )
             st.markdown('<div class="section-title">Sources</div>', unsafe_allow_html=True)
             for source in result["sources"]:
@@ -473,3 +604,6 @@ if run_query:
                 for item in retrieved:
                     st.markdown(f"**[{item['citation']}] {item['source_name']}**")
                     st.write(item["text"])
+        finally:
+            if not llm_enabled or force_local:
+                rag.OPENROUTER_API_KEY = original_key
